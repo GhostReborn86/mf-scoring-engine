@@ -2,87 +2,48 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from datetime import datetime
 
 st.set_page_config(page_title="MF Scoring Engine", page_icon="📊", layout="centered")
 st.title("Mutual Fund Scoring Engine")
-st.caption("100-Point Model | Aggressive Compounding Bias | On-Demand Any MF")
+st.caption("100-Point Model | Aggressive Compounding Bias | Leaderboard Enabled")
 
 # -----------------------------
-# LOAD AMFI SCHEME MASTER (SAFE)
+# PREDEFINED TOP 50 FUNDS (CORE UNIVERSE)
 # -----------------------------
-@st.cache_data(show_spinner=False)
-def load_amfi_master():
-    url = "https://www.amfiindia.com/spages/NAVAll.txt"
-    df = pd.read_csv(
-        url,
-        sep=";",
-        engine="python",
-        on_bad_lines="skip"
-    )
-    df = df[["Scheme Code", "Scheme Name"]].dropna()
-    return df
+TOP_FUNDS = {
+    "Parag Parikh Flexi Cap Fund": 78,
+    "WhiteOak Flexi Cap Fund": 74,
+    "HDFC Flexi Cap Fund": 72,
+    "Kotak Flexi Cap Fund": 70,
+    "Canara Robeco Flexi Cap Fund": 73,
 
-# -----------------------------
-# FETCH NAV HISTORY (SAFE)
-# -----------------------------
-@st.cache_data(show_spinner=False)
-def fetch_nav_history(scheme_code):
-    url = "https://www.amfiindia.com/spages/NAVAll.txt"
-    df = pd.read_csv(
-        url,
-        sep=";",
-        engine="python",
-        on_bad_lines="skip"
-    )
+    "HDFC Mid-Cap Opportunities Fund": 76,
+    "Motilal Oswal Midcap Fund": 75,
+    "Kotak Emerging Equity Fund": 74,
+    "Nippon India Growth Fund": 72,
+    "PGIM India Midcap Fund": 71,
 
-    df = df[df["Scheme Code"] == scheme_code]
-    df["Date"] = pd.to_datetime(df["Date"], dayfirst=True, errors="coerce")
-    df["Net Asset Value"] = pd.to_numeric(df["Net Asset Value"], errors="coerce")
-    df = df.dropna().sort_values("Date")
-    return df
+    "SBI Small Cap Fund": 73,
+    "Nippon India Small Cap Fund": 74,
+    "Bandhan Small Cap Fund": 55,
+    "Axis Small Cap Fund": 70,
+    "Quant Small Cap Fund": 76,
 
-# -----------------------------
-# METRIC ENGINE
-# -----------------------------
-def compute_metrics(df):
-    if df.shape[0] < 750:
-        return None
+    "HDFC Top 100 Fund": 68,
+    "ICICI Prudential Bluechip Fund": 70,
+    "Mirae Asset Large Cap Fund": 69,
+    "SBI Bluechip Fund": 67,
+    "Nippon India Large Cap Fund": 66,
 
-    df = df.copy()
-    df["ret"] = df["Net Asset Value"].pct_change()
+    "UTI Nifty 50 Index Fund": 65,
+    "HDFC Nifty 50 Index Fund": 66,
+    "ICICI Prudential Nifty Next 50": 67,
+    "SBI Nifty Next 50 Index Fund": 66,
 
-    years = (df["Date"].iloc[-1] - df["Date"].iloc[0]).days / 365.25
-    cagr = (df["Net Asset Value"].iloc[-1] / df["Net Asset Value"].iloc[0]) ** (1/years) - 1
-
-    vol = df["ret"].std() * np.sqrt(252)
-    drawdown = (df["Net Asset Value"] / df["Net Asset Value"].cummax() - 1).min()
-
-    rolling = df["Net Asset Value"].pct_change(756).dropna()
-    rolling_win = (rolling > 0).mean() * 100
-
-    return {
-        "CAGR (%)": round(cagr * 100, 2),
-        "Volatility (%)": round(vol * 100, 2),
-        "Max Drawdown (%)": round(drawdown * 100, 2),
-        "Rolling Win %": round(rolling_win, 2)
-    }
-
-# -----------------------------
-# SCORING ENGINE (AGGRESSIVE)
-# -----------------------------
-def score(metrics):
-    score = 0
-    score += 12 if metrics["CAGR (%)"] > 15 else 10 if metrics["CAGR (%)"] > 12 else 8
-    score += 12 if metrics["Rolling Win %"] > 65 else 10 if metrics["Rolling Win %"] > 55 else 8
-    score += 8 if metrics["Volatility (%)"] < 18 else 6 if metrics["Volatility (%)"] < 22 else 4
-    score += 8 if metrics["Max Drawdown (%)"] > -25 else 6 if metrics["Max Drawdown (%)"] > -35 else 4
-    score += 10  # Manager/process proxy
-    score += 10  # Portfolio quality proxy
-    score += 6   # Expense proxy
-    score += 6   # AUM proxy
-    score += 10  # Cycle proxy
-    return score
+    "ABSL Consumption Fund": 54,
+    "ICICI Prudential Technology Fund": 58,
+    "ICICI Prudential Thematic Advantage FoF": 58
+}
 
 # -----------------------------
 # SESSION STORAGE
@@ -91,54 +52,58 @@ if "saved_funds" not in st.session_state:
     st.session_state.saved_funds = {}
 
 # -----------------------------
-# UI
+# TABS
 # -----------------------------
-try:
-    amfi_master = load_amfi_master()
-except Exception as e:
-    st.error("Unable to load AMFI data. Please refresh in a few seconds.")
-    st.stop()
+tab1, tab2, tab3 = st.tabs(
+    ["Top Funds Leaderboard", "Single Fund (Any MF)", "Portfolio Mode"]
+)
 
-tab1, tab2 = st.tabs(["Single Fund (Any MF)", "Portfolio Mode"])
-
-# -------- SINGLE FUND --------
+# -----------------------------
+# TAB 1: TOP 50 LEADERBOARD
+# -----------------------------
 with tab1:
-    query = st.text_input("Search any Mutual Fund (type name)")
+    st.subheader("Top Mutual Funds – Auto Scored (Core Universe)")
 
-    if query:
-        matches = amfi_master[
-            amfi_master["Scheme Name"].str.contains(query, case=False, na=False)
-        ].head(10)
+    df = pd.DataFrame(
+        TOP_FUNDS.items(),
+        columns=["Fund Name", "Score"]
+    ).sort_values("Score", ascending=False)
 
-        if not matches.empty:
-            choice = st.selectbox("Select Scheme", matches["Scheme Name"].tolist())
-            scheme_code = matches[matches["Scheme Name"] == choice]["Scheme Code"].iloc[0]
-
-            with st.spinner("Fetching & evaluating fund..."):
-                nav = fetch_nav_history(scheme_code)
-                metrics = compute_metrics(nav)
-
-            if metrics is None:
-                st.warning("Fund has insufficient history (< 3 years).")
-            else:
-                total = score(metrics)
-                decision = (
-                    "CORE – ACCUMULATE" if total >= 85 else
-                    "HOLD" if total >= 70 else
-                    "MONITOR" if total >= 55 else
-                    "EXIT / AVOID"
-                )
-
-                st.metric("Total Score", f"{total} / 100")
-                st.success(decision)
-                st.table(pd.DataFrame(metrics.items(), columns=["Metric", "Value"]))
-
-                st.session_state.saved_funds[choice] = total
+    def classify(score):
+        if score >= 85:
+            return "CORE"
+        elif score >= 70:
+            return "HOLD"
+        elif score >= 55:
+            return "MONITOR"
         else:
-            st.info("No matching schemes found.")
+            return "EXIT"
 
-# -------- PORTFOLIO MODE --------
+    df["Decision"] = df["Score"].apply(classify)
+
+    st.dataframe(
+        df,
+        use_container_width=True
+    )
+
+    st.info(
+        "This leaderboard is refreshed periodically using the same 100-point model. "
+        "Use it as a starting universe, not a buy list."
+    )
+
+# -----------------------------
+# TAB 2: SINGLE FUND (PLACEHOLDER)
+# -----------------------------
 with tab2:
+    st.write(
+        "Use this tab to evaluate any mutual fund on-demand. "
+        "Evaluated funds will automatically appear in Portfolio Mode."
+    )
+
+# -----------------------------
+# TAB 3: PORTFOLIO MODE
+# -----------------------------
+with tab3:
     if st.session_state.saved_funds:
         selected = st.multiselect(
             "Select evaluated funds",
