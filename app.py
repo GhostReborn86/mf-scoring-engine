@@ -1,141 +1,153 @@
 
 import streamlit as st
 import pandas as pd
+import numpy as np
+from datetime import datetime
 
-st.set_page_config(
-    page_title="MF Scoring Engine",
-    page_icon="📊",
-    layout="centered"
-)
-
+st.set_page_config(page_title="MF Scoring Engine", page_icon="📊", layout="centered")
 st.title("Mutual Fund Scoring Engine")
-st.caption("100-Point Model | Aggressive Compounding Bias")
+st.caption("100-Point Model | Aggressive Compounding Bias | On-Demand Any MF")
 
-# ---------------- FUND DATABASE ----------------
-funds = {
-    "Parag Parikh Flexi Cap Fund": {
-        "category": "Flexi Cap", "benchmark": "NIFTY 500 TRI",
-        "alpha": 1.6, "rolling": 72, "sortino": 1.8, "volatility": 16,
-        "downside": 88, "manager": 10, "expense": 0.75,
-        "aum": 60000, "portfolio": 9, "cycle": 8
-    },
-    "WhiteOak Flexi Cap Fund": {
-        "category": "Flexi Cap", "benchmark": "NIFTY 500 TRI",
-        "alpha": 1.9, "rolling": 68, "sortino": 1.6, "volatility": 17,
-        "downside": 92, "manager": 6, "expense": 0.78,
-        "aum": 18000, "portfolio": 8, "cycle": 7
-    },
-    "HDFC Mid-Cap Opportunities Fund": {
-        "category": "Mid Cap", "benchmark": "NIFTY Midcap 150 TRI",
-        "alpha": 2.2, "rolling": 65, "sortino": 1.5, "volatility": 21,
-        "downside": 105, "manager": 9, "expense": 0.85,
-        "aum": 52000, "portfolio": 8, "cycle": 7
-    },
-    "SBI Small Cap Fund": {
-        "category": "Small Cap", "benchmark": "NIFTY Smallcap 250 TRI",
-        "alpha": 3.1, "rolling": 60, "sortino": 1.4, "volatility": 26,
-        "downside": 118, "manager": 8, "expense": 0.9,
-        "aum": 26000, "portfolio": 7, "cycle": 6
-    },
-    "Bandhan Small Cap Fund": {
-        "category": "Small Cap", "benchmark": "NIFTY Smallcap 250 TRI",
-        "alpha": 2.5, "rolling": 55, "sortino": 1.2, "volatility": 27,
-        "downside": 120, "manager": 5, "expense": 0.92,
-        "aum": 9000, "portfolio": 6, "cycle": 5
-    },
-    "ABSL Consumption Fund": {
-        "category": "Thematic", "benchmark": "NIFTY India Consumption",
-        "alpha": 1.1, "rolling": 48, "sortino": 1.0, "volatility": 24,
-        "downside": 122, "manager": 6, "expense": 0.88,
-        "aum": 4500, "portfolio": 6, "cycle": 4
+# -----------------------------
+# LOAD AMFI SCHEME MASTER
+# -----------------------------
+@st.cache_data(show_spinner=False)
+def load_amfi_master():
+    url = "https://www.amfiindia.com/spages/NAVAll.txt"
+    df = pd.read_csv(url, sep=';', skiprows=1)
+    df = df[['Scheme Code', 'Scheme Name']].dropna()
+    return df
+
+amfi_master = load_amfi_master()
+
+# -----------------------------
+# SESSION STORE FOR SAVED FUNDS
+# -----------------------------
+if "saved_funds" not in st.session_state:
+    st.session_state.saved_funds = {}
+
+# -----------------------------
+# NAV FETCH
+# -----------------------------
+@st.cache_data(show_spinner=False)
+def fetch_nav_history(code):
+    url = f"https://www.amfiindia.com/spages/NAVAll.txt"
+    df = pd.read_csv(url, sep=';', skiprows=1)
+    df = df[df["Scheme Code"] == code]
+    df["Date"] = pd.to_datetime(df["Date"], dayfirst=True, errors="coerce")
+    df["Net Asset Value"] = pd.to_numeric(df["Net Asset Value"], errors="coerce")
+    df = df.dropna().sort_values("Date")
+    return df
+
+# -----------------------------
+# METRIC ENGINE
+# -----------------------------
+def compute_metrics(df):
+    if len(df) < 750:  # ~3Y trading days
+        return None
+
+    df = df.copy()
+    df["ret"] = df["Net Asset Value"].pct_change()
+
+    years = (df["Date"].iloc[-1] - df["Date"].iloc[0]).days / 365
+    cagr = (df["Net Asset Value"].iloc[-1] / df["Net Asset Value"].iloc[0]) ** (1/years) - 1
+
+    vol = df["ret"].std() * np.sqrt(252)
+    drawdown = (df["Net Asset Value"] / df["Net Asset Value"].cummax() - 1).min()
+
+    rolling = df["Net Asset Value"].pct_change(756).dropna()
+    rolling_win = (rolling > 0).mean() * 100
+
+    return {
+        "cagr": round(cagr*100,2),
+        "vol": round(vol*100,2),
+        "drawdown": round(drawdown*100,2),
+        "rolling": round(rolling_win,2)
     }
-}
 
-# ---------------- SCORING FUNCTIONS ----------------
-def score_alpha(x): return 12 if x > 2 else 10 if x > 1.5 else 8 if x > 1 else 6
-def score_rolling(x): return 12 if x > 70 else 10 if x > 60 else 8 if x > 50 else 6
-def score_sortino(x): return 10 if x > 1.8 else 8 if x > 1.5 else 6 if x > 1.2 else 4
-def score_volatility(x): return 8 if x < 16 else 6 if x < 20 else 4
-def score_downside(x): return 8 if x < 90 else 6 if x < 100 else 4
-def score_manager(x): return 8 if x >= 10 else 6 if x >= 7 else 4
-def score_expense(x): return 6 if x < 0.8 else 4
-def score_aum(x): return 6 if 5000 < x < 50000 else 4
+# -----------------------------
+# SCORING (AGGRESSIVE)
+# -----------------------------
+def score(metrics):
+    score = 0
+    score += 12 if metrics["cagr"] > 15 else 10 if metrics["cagr"] > 12 else 8
+    score += 12 if metrics["rolling"] > 65 else 10 if metrics["rolling"] > 55 else 8
+    score += 8 if metrics["vol"] < 18 else 6 if metrics["vol"] < 22 else 4
+    score += 8 if metrics["drawdown"] > -25 else 6 if metrics["drawdown"] > -35 else 4
+    score += 10  # manager/process proxy
+    score += 10  # portfolio quality proxy
+    score += 6   # expense proxy
+    score += 6   # AUM proxy
+    score += 10  # cycle proxy
+    return score
 
-def calculate_score(f):
-    scores = {
-        "Benchmark Alpha": score_alpha(f["alpha"]),
-        "Rolling Return Consistency": score_rolling(f["rolling"]),
-        "Risk Adjusted Return": score_sortino(f["sortino"]),
-        "Volatility Control": score_volatility(f["volatility"]),
-        "Downside Protection": score_downside(f["downside"]),
-        "Fund Manager Stability": score_manager(f["manager"]),
-        "Portfolio Quality": f["portfolio"],
-        "Expense Ratio Efficiency": score_expense(f["expense"]),
-        "AUM Suitability": score_aum(f["aum"]),
-        "Market Cycle Performance": f["cycle"]
-    }
-    return scores, sum(scores.values())
+# -----------------------------
+# UI TABS
+# -----------------------------
+tab1, tab2 = st.tabs(["Single Fund (Any MF)", "Portfolio Mode"])
 
-# ---------------- TABS ----------------
-tab1, tab2 = st.tabs(["Single Fund", "Portfolio Mode"])
-
-# -------- Single Fund --------
+# -----------------------------
+# SINGLE FUND
+# -----------------------------
 with tab1:
-    fund_name = st.selectbox("Select Mutual Fund", [""] + sorted(funds.keys()))
-    if fund_name:
-        f = funds[fund_name]
-        scores, total = calculate_score(f)
+    query = st.text_input("Search any Mutual Fund (type name)")
 
-        decision = (
-            "CORE – ACCUMULATE" if total >= 85 else
-            "HOLD" if total >= 70 else
-            "MONITOR" if total >= 55 else
-            "EXIT / AVOID"
-        )
+    if query:
+        matches = amfi_master[amfi_master["Scheme Name"].str.contains(query, case=False)].head(10)
+        if not matches.empty:
+            choice = st.selectbox("Select Scheme", matches["Scheme Name"].tolist())
+            code = matches[matches["Scheme Name"] == choice]["Scheme Code"].iloc[0]
 
-        st.subheader(fund_name)
-        st.write(f"Category: {f['category']}")
-        st.write(f"Benchmark: {f['benchmark']}")
-        st.metric("Total Score", f"{total} / 100")
-        st.success(decision)
-        st.table(pd.DataFrame(scores.items(), columns=["Criteria", "Score"]))
+            with st.spinner("Fetching & evaluating fund..."):
+                nav = fetch_nav_history(code)
+                metrics = compute_metrics(nav)
 
-# -------- Portfolio Mode --------
+            if metrics is None:
+                st.warning("Insufficient history (<3 years). Score not reliable.")
+            else:
+                total = score(metrics)
+                decision = (
+                    "CORE – ACCUMULATE" if total >= 85 else
+                    "HOLD" if total >= 70 else
+                    "MONITOR" if total >= 55 else
+                    "EXIT / AVOID"
+                )
+
+                st.metric("Total Score", f"{total} / 100")
+                st.success(decision)
+                st.table(pd.DataFrame(metrics.items(), columns=["Metric","Value"]))
+
+                st.session_state.saved_funds[choice] = total
+        else:
+            st.info("No matching schemes found.")
+
+# -----------------------------
+# PORTFOLIO MODE
+# -----------------------------
 with tab2:
-    st.subheader("Build Your Portfolio")
-
-    selected_funds = st.multiselect(
-        "Select Funds",
-        options=sorted(funds.keys())
-    )
-
-    weights = {}
-    total_weight = 0
-
-    for fund in selected_funds:
-        w = st.number_input(
-            f"Weight for {fund} (%)",
-            min_value=0.0, max_value=100.0, step=5.0
-        )
-        weights[fund] = w
-        total_weight += w
-
-    if selected_funds and total_weight > 0:
-        portfolio_score = 0
-        details = []
-
-        for fund in selected_funds:
-            scores, total = calculate_score(funds[fund])
-            weighted = total * (weights[fund] / total_weight)
-            portfolio_score += weighted
-            details.append([fund, total, weights[fund]])
-
-        decision = (
-            "STRONG PORTFOLIO" if portfolio_score >= 75 else
-            "AVERAGE – NEEDS IMPROVEMENT" if portfolio_score >= 65 else
-            "HIGH RISK / WEAK"
+    if st.session_state.saved_funds:
+        st.subheader("Saved / Evaluated Funds")
+        selected = st.multiselect(
+            "Select funds",
+            list(st.session_state.saved_funds.keys())
         )
 
-        st.metric("Portfolio Score", f"{portfolio_score:.1f} / 100")
-        st.success(decision)
-        st.table(pd.DataFrame(details, columns=["Fund", "Score", "Weight (%)"]))
+        weights = {}
+        total_w = 0
+        for f in selected:
+            w = st.number_input(f"Weight for {f} (%)", 0.0, 100.0, 10.0)
+            weights[f] = w
+            total_w += w
+
+        if selected and total_w > 0:
+            pscore = 0
+            rows = []
+            for f in selected:
+                s = st.session_state.saved_funds[f]
+                pscore += s * (weights[f] / total_w)
+                rows.append([f, s, weights[f]])
+
+            st.metric("Portfolio Score", f"{pscore:.1f} / 100")
+            st.table(pd.DataFrame(rows, columns=["Fund","Score","Weight (%)"]))
+    else:
+        st.info("No evaluated funds yet. Evaluate a fund first.")
